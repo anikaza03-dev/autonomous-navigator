@@ -496,8 +496,9 @@ function handleMotion(event) {
     if (!acc || acc.x === null) return;
 
     const acceleration = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
+    const limitedAcc = Math.min(acceleration, 5.0);
     if (acceleration > 0.8) {
-        const speed = 0.00005;
+        const speed = 0.0000001;
         userPos.x += Math.sin(heading * Math.PI / 180) * acceleration * speed;
         userPos.y += Math.cos(heading * Math.PI / 180) * acceleration * speed;
 
