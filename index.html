@@ -296,29 +296,10 @@
         let coordsA = null;
         let coordsB = null;
         let cityBoundingBox = null;
+        let userMarker = null; // Маркер пользователя
+        let userPos = { x: 0, y: 0 }; // Текущее смещение
+        let heading = 0; // Направление компаса
 
-        // --- БЛОК РАБОТЫ С ДАТЧИКАМИ ---
-        function requestSensorPermission(mode) {
-            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-                DeviceOrientationEvent.requestPermission()
-                    .then(response => {
-                        if (response === 'granted') {
-                            window.addEventListener('deviceorientation', handleOrientation);
-                            window.addEventListener('devicemotion', handleMotion);
-                            console.log("Доступ к датчикам разрешен");
-                            buildRoute(mode);
-                        } else {
-                            alert("Доступ к датчикам отклонен");
-                            buildRoute(mode);
-                        }
-                    })
-                    .catch(console.error);
-            } else {
-                window.addEventListener('deviceorientation', handleOrientation);
-                window.addEventListener('devicemotion', handleMotion);
-                buildRoute(mode);
-            }
-        }
 
         function handleOrientation(event) { 
             // Это будет срабатывать очень часто (десятки раз в секунду)
@@ -457,6 +438,11 @@
                 if (markerB) map.removeLayer(markerB);
 
                 routeLine = L.polyline(coordinates, { color: '#007aff', weight: 6, opacity: 0.8 }).addTo(map);
+                if (!userMarker) {
+                userMarker = L.circleMarker(coordsA, { 
+                radius: 8, fillColor: '#007aff', color: '#fff', weight: 3, fillOpacity: 1 
+            }).addTo(map);
+        }
                 markerA = L.circleMarker(coordsA, { radius: 7, fillColor: '#34c759', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(map);
                 markerB = L.circleMarker(coordsB, { radius: 7, fillColor: '#ff3b30', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(map);
 
@@ -489,6 +475,39 @@
             document.getElementById('navigation-panel').style.display = 'none';
             document.getElementById('setup-panel').style.display = 'block';
         }
+        function requestSensorPermission(mode) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().then(response => {
+            if (response === 'granted') {
+                window.addEventListener('deviceorientation', e => heading = e.alpha || 0);
+                window.addEventListener('devicemotion', handleMotion);
+                buildRoute(mode);
+            }
+        });
+    } else {
+        window.addEventListener('deviceorientation', e => heading = e.alpha || 0);
+        window.addEventListener('devicemotion', handleMotion);
+        buildRoute(mode);
+    }
+}
+function handleMotion(event) {
+    if (!userMarker || !coordsA) return;
+    const acc = event.acceleration;
+    if (!acc || acc.x === null) return;
+
+    const acceleration = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
+    if (acceleration > 0.8) {
+        const speed = 0.00005;
+        userPos.x += Math.sin(heading * Math.PI / 180) * acceleration * speed;
+        userPos.y += Math.cos(heading * Math.PI / 180) * acceleration * speed;
+
+        const newLat = coordsA[0] + (userPos.y * 10);
+        const newLng = coordsA[1] + (userPos.x * 10);
+        
+        userMarker.setLatLng([newLat, newLng]);
+        map.panTo([newLat, newLng]);
+    }
+}
     </script>
 </body>
 </html>
