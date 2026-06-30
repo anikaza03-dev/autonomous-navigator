@@ -296,21 +296,22 @@
         let coordsA = null;
         let coordsB = null;
         let cityBoundingBox = null;
-        let userMarker = null; // Маркер пользователя
-        let userPos = { x: 0, y: 0 }; // Текущее смещение
-        let heading = 0; // Направление компаса
+        let userMarker = null; 
+        let userPos = { x: 0, y: 0 }; 
+        let heading = 0; 
         let filteredAcc = 0;
         const alphaFilter = 0.15;
 
+        // --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ СТАБИЛИЗАЦИИ И ПЕРЕПРОКЛАДКИ ---
+        let currentVehicleMode = 'foot'; // Храним режим (пешком/авто)
+        let isRerouting = false;         // Блокировка повторных запросов при перерасчете
+        let lastStepTime = 0;            // Таймер для фильтрации частоты шагов
+
 
         function handleOrientation(event) { 
-            // Это будет срабатывать очень часто (десятки раз в секунду)
             console.log('Ориентация (alpha/beta/gamma):', event.alpha, event.beta, event.gamma); 
-        } { /* Логика обработки ориентации */ }
-        function handleMotion(event) { 
-            // Это покажет ускорение устройства
-            console.log('Движение (acceleration):', event.acceleration.x, event.acceleration.y, event.acceleration.z); 
-        } { /* Логика обработки акселерометра */ }
+        }
+        
         // -------------------------------
 
         window.onload = function() {
@@ -383,7 +384,6 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
         timeoutId = setTimeout(() => {
             let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=ru&limit=5`;
             
-            // Безопасная проверка: добавляем фильтр города, только если он выбран
             if (typeof cityBoundingBox !== 'undefined' && cityBoundingBox) {
                 url += `&viewbox=${cityBoundingBox}&bounded=1`;
             }
@@ -412,7 +412,9 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
         }, 500);
     });
 }
-       function buildRoute(mode) {
+
+        // --- ИЗМЕНЕННАЯ ФУНКЦИЯ СТРОИТЕЛЬСТВА МАРШРУТА ---
+        function buildRoute(mode) {
             if (!coordsA || !coordsB) {
                 alert("Выберите точки отправления и назначения!");
                 return;
@@ -429,6 +431,9 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
             fetch(url)
             .then(res => res.json())
             .then(data => {
+                // Маршрут успешно получен, снимаем блокировку перепрокладки
+                isRerouting = false; 
+                
                 if (!data.paths || data.paths.length === 0) {
                     alert("Маршрут не найден! Попробуйте другие точки.");
                     exitNavigation();
@@ -436,6 +441,7 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
                 }
 
                 const path = data.paths[0];
+                document.getElementById('nav-instruction').innerText = "Следуйте по маршруту";
                 const coordinates = path.points.coordinates.map(c => [c[1], c[0]]);
 
                 if (routeLine) map.removeLayer(routeLine);
@@ -443,11 +449,16 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
                 if (markerB) map.removeLayer(markerB);
 
                 routeLine = L.polyline(coordinates, { color: '#007aff', weight: 6, opacity: 0.8 }).addTo(map);
+                
+                // Если маркер пользователя уже создан, просто двигаем его на старт, а не дублируем
                 if (!userMarker) {
-                userMarker = L.circleMarker(coordsA, { 
-                radius: 8, fillColor: '#007aff', color: '#fff', weight: 3, fillOpacity: 1 
-            }).addTo(map);
-        }
+                    userMarker = L.circleMarker(coordsA, { 
+                        radius: 8, fillColor: '#007aff', color: '#fff', weight: 3, fillOpacity: 1 
+                    }).addTo(map);
+                } else {
+                    userMarker.setLatLng(coordsA);
+                }
+
                 markerA = L.circleMarker(coordsA, { radius: 7, fillColor: '#34c759', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(map);
                 markerB = L.circleMarker(coordsB, { radius: 7, fillColor: '#ff3b30', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(map);
 
@@ -456,6 +467,7 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
             })
             .catch(err => {
                 console.error(err);
+                isRerouting = false;
                 alert("Ошибка сети или API ключа.");
                 exitNavigation();
             });
@@ -480,70 +492,119 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
             document.getElementById('navigation-panel').style.display = 'none';
             document.getElementById('setup-panel').style.display = 'block';
         }
-       let baseHeading = 0; // Должна быть объявлена в начале скрипта
+        
+        let baseHeading = 0; 
 
+        // --- ИЗМЕНЕННАЯ ФУНКЦИЯ ЗАПРОСА ДАТЧИКОВ ---
         function requestSensorPermission(mode) {
-            // Вспомогательная функция для обработки ориентации
+            currentVehicleMode = mode; // Запоминаем выбранный пресет перемещения
+            
             const handleOrientation = (e) => {
-            if (e.alpha !== null) {
-            if (baseHeading === 0) baseHeading = e.alpha;
-            // Рассчитываем относительный поворот с защитой от "минусовых" значений
-            heading = (e.alpha - baseHeading + 360) % 360;
-        }
-    };
+                if (e.alpha !== null) {
+                    if (baseHeading === 0) baseHeading = e.alpha;
+                    heading = (e.alpha - baseHeading + 360) % 360;
+                }
+            };
 
-    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-        DeviceOrientationEvent.requestPermission().then(response => {
-            if (response === 'granted') {
+            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission().then(response => {
+                    if (response === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                        window.addEventListener('devicemotion', handleMotion);
+                        buildRoute(mode);
+                    }
+                });
+            } else {
                 window.addEventListener('deviceorientation', handleOrientation);
                 window.addEventListener('devicemotion', handleMotion);
                 buildRoute(mode);
             }
-        });
-    } else {
-        // Для устройств, не требующих явного разрешения
-        window.addEventListener('deviceorientation', handleOrientation);
-        window.addEventListener('devicemotion', handleMotion);
-        buildRoute(mode);
-    }
-}
+        }
+
+// --- ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ ФУНКЦИЯ ОБРАБОТКИ ДВИЖЕНИЯ ---
 function handleMotion(event) {
-    if (!userMarker || !coordsA) return;
+    if (!userMarker || !coordsA || isRerouting) return;
+    
     const acc = event.acceleration;
     if (!acc || acc.x === null) return;
 
-    // Считаем ускорение (без Z, так как телефон в кармане/руке движется горизонтально)
+    // Считаем текущее ускорение устройства
     const rawAcc = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
     filteredAcc = (alphaFilter * rawAcc) + ((1 - alphaFilter) * filteredAcc);
 
-    // ВЫВОД В КОНСОЛЬ ДЛЯ ОТЛАДКИ (откройте F12 в браузере телефона, если возможно)
-    // console.log("Ускорение:", filteredAcc);
+    const now = Date.now();
 
-    // Снижаем порог до 0.1, чтобы реагировать на малейшие шаги
-    if (filteredAcc > 0.1) { 
-        // Увеличиваем масштаб в 10 раз относительно предыдущего
-        const scale = 0.00001; 
+    /* ФИЛЬТР ТРЯСКИ И ШАГА:
+      1. filteredAcc > 0.6 — отсекаем мелкие дрожания рук.
+      2. filteredAcc < 4.5 — жесткое ограничение. Если телефон интенсивно трясут, 
+         ускорение вылетит за этот лимит, и шаг не зачтется. Точка останется на месте.
+      3. now - lastStepTime > 400 — человек физически не может делать шаги чаще, 
+         чем раз в 400 миллисекунд. Защита от спама ложных сигналов датчика.
+    */
+    if (filteredAcc > 0.6 && filteredAcc < 4.5 && (now - lastStepTime > 400)) { 
+        lastStepTime = now;
         
-        // Добавляем движение
-        userPos.x += Math.sin(heading * Math.PI / 180) * filteredAcc * scale;
-        userPos.y += Math.cos(heading * Math.PI / 180) * filteredAcc * scale;
+        // Фиксированная длина шага в координатной сетке карты (примерно 0.7 - 1 метр)
+        const stepSize = 0.000008; 
+        
+        // Прибавляем строго фиксированный шаг по вектору направления компаса
+        userPos.x += Math.sin(heading * Math.PI / 180) * stepSize;
+        userPos.y += Math.cos(heading * Math.PI / 180) * stepSize;
 
-        // Умножаем на 0.05, чтобы сдвиг был заметен на карте сразу
-        let targetLat = coordsA[0] + (userPos.y * 0.05); 
-        let targetLng = coordsA[1] + (userPos.x * 0.05);
+        // Рассчитываем новые потенциальные координаты
+        let targetLat = coordsA[0] + userPos.y; 
+        let targetLng = coordsA[1] + userPos.x;
 
-        let finalPos = routeLine ? getClosestPointOnRoute(targetLat, targetLng, routeLine) : [targetLat, targetLng];
+        // Измеряем дистанцию до проложенного маршрута
+        let minDistance = Infinity;
+        let closestPoint = coordsA;
+
+        if (routeLine) {
+            const latlngs = routeLine.getLatLngs();
+            latlngs.forEach(p => {
+                const dist = map.distance([targetLat, targetLng], p);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestPoint = p;
+                }
+            });
+        }
+
+        /* ЛОГИКА СХОДА С МАРШРУТА (АВТОМАТИЧЕСКИЙ РЕРАУТИНГ):
+          Если мы ушли в сторону от линии дороги более чем на 30 метров.
+        */
+        if (minDistance > 30 && routeLine) {
+            isRerouting = true; // Блокируем новые шаги на время обработки запроса API
+            document.getElementById('nav-instruction').innerText = "Перерасчет маршрута...";
+            
+            // Назначаем текущие фактические координаты новой точкой старта (А)
+            coordsA = [targetLat, targetLng];
+            
+            // Сбрасываем накопленный шаг, так как теперь отсчет идет от новой coordsA
+            userPos = { x: 0, y: 0 }; 
+            
+            // Запрашиваем новый путь из текущего места до старой точки Б
+            setTimeout(() => {
+                buildRoute(currentVehicleMode);
+            }, 400);
+            return;
+        }
+
+        // Если мы в пределах 20 метров — плавно магнитим точку к дороге.
+        // Если между 20 и 30 метрами — отображаем реальный сход с дороги.
+        let finalPos = minDistance < 20 ? [closestPoint.lat, closestPoint.lng] : [targetLat, targetLng];
         
         userMarker.setLatLng(finalPos);
 
-        // Плавная центровка
+        // Центрируем карту за пользователем
         if (map.getBounds && !map.getBounds().contains(finalPos)) {
             map.panTo(finalPos);
         }
     }
 }
-  // Функция находит ближайшую точку на линии маршрута
-  function getClosestPointOnRoute(lat, lng, polyline) {
+
+// Функция находит ближайшую точку на линии маршрута
+function getClosestPointOnRoute(lat, lng, polyline) {
         const latlngs = polyline.getLatLngs();
         let minDistance = Infinity;
         let closestPoint = latlngs[0];
@@ -555,7 +616,6 @@ function handleMotion(event) {
             closestPoint = p;
         }
     });
-    // Если мы ближе 20 метров к дороге, "магнитим" нас к ней
     return minDistance < 20 ? closestPoint : [lat, lng];
     }
    </script>
