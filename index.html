@@ -299,6 +299,8 @@
         let userMarker = null; // Маркер пользователя
         let userPos = { x: 0, y: 0 }; // Текущее смещение
         let heading = 0; // Направление компаса
+        let filteredAcc = 0;
+        const alphaFilter = 0.15;
 
 
         function handleOrientation(event) { 
@@ -364,49 +366,52 @@
             });
         }
 
-        function setupAddressAutocomplete(inputId, suggestPanelId) {
-            const input = document.getElementById(inputId);
-            const suggestBox = document.getElementById(suggestPanelId);
-            let timeoutId;
+function setupAddressAutocomplete(inputId, suggestPanelId) {
+    const input = document.getElementById(inputId);
+    const suggestBox = document.getElementById(suggestPanelId);
+    let timeoutId;
 
-            input.addEventListener('input', function() {
-                clearTimeout(timeoutId);
-                const query = this.value.trim();
-                if (query.length < 3) { suggestBox.style.display = 'none'; return; }
-
-                timeoutId = setTimeout(() => {
-                    let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=ru&limit=5`;
-                    if (cityBoundingBox) url += `&viewbox=${cityBoundingBox}&bounded=1`;
-
-                    fetch(url, { headers: { 'Accept': 'application/json' } })
-                    .then(res => res.json())
-                    .then(data => {
-                        suggestBox.innerHTML = '';
-                        if (!data || data.length === 0) { suggestBox.style.display = 'none'; return; }
-                        suggestBox.style.display = 'block';
-
-                        data.forEach(item => {
-                            let shortName = item.display_name;
-                            const parts = shortName.split(',');
-                            if(parts.length > 3) shortName = parts.slice(0, 3).join(',');
-
-                            const div = document.createElement('div');
-                            div.className = 'suggest-item';
-                            div.innerText = shortName;
-                            div.addEventListener('click', () => {
-                                input.value = shortName;
-                                suggestBox.style.display = 'none';
-                                const c = [parseFloat(item.lat), parseFloat(item.lon)];
-                                if (inputId === 'to') coordsB = c; else coordsA = c;
-                                map.setView(c, 15);
-                            });
-                            suggestBox.appendChild(div);
-                        });
-                    });
-                }, 400);
-            });
+    input.addEventListener('input', function() {
+        clearTimeout(timeoutId);
+        const query = this.value.trim();
+        
+        if (query.length < 3) { 
+            suggestBox.style.display = 'none'; 
+            return; 
         }
 
+        timeoutId = setTimeout(() => {
+            let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=ru&limit=5`;
+            
+            // Безопасная проверка: добавляем фильтр города, только если он выбран
+            if (typeof cityBoundingBox !== 'undefined' && cityBoundingBox) {
+                url += `&viewbox=${cityBoundingBox}&bounded=1`;
+            }
+
+            fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                suggestBox.innerHTML = '';
+                if (!data || data.length === 0) { suggestBox.style.display = 'none'; return; }
+                suggestBox.style.display = 'block';
+
+                data.forEach(item => {
+                    const div = document.createElement('div');
+                    div.className = 'suggest-item';
+                    div.innerText = item.display_name.split(',').slice(0, 3).join(',');
+                    div.onclick = function() {
+                        input.value = div.innerText;
+                        suggestBox.style.display = 'none';
+                        const c = [parseFloat(item.lat), parseFloat(item.lon)];
+                        if (inputId === 'to') coordsB = c; else coordsA = c;
+                        map.setView(c, 16);
+                    };
+                    suggestBox.appendChild(div);
+                });
+            });
+        }, 500);
+    });
+}
        function buildRoute(mode) {
             if (!coordsA || !coordsB) {
                 alert("Выберите точки отправления и назначения!");
@@ -475,40 +480,76 @@
             document.getElementById('navigation-panel').style.display = 'none';
             document.getElementById('setup-panel').style.display = 'block';
         }
+       let baseHeading = 0; // Должна быть объявлена в начале скрипта
+
         function requestSensorPermission(mode) {
+            // Вспомогательная функция для обработки ориентации
+            const handleOrientation = (e) => {
+            if (e.alpha !== null) {
+            if (baseHeading === 0) baseHeading = e.alpha;
+            // Рассчитываем относительный поворот с защитой от "минусовых" значений
+            heading = (e.alpha - baseHeading + 360) % 360;
+        }
+    };
+
     if (typeof DeviceOrientationEvent.requestPermission === 'function') {
         DeviceOrientationEvent.requestPermission().then(response => {
             if (response === 'granted') {
-                window.addEventListener('deviceorientation', e => heading = e.alpha || 0);
+                window.addEventListener('deviceorientation', handleOrientation);
                 window.addEventListener('devicemotion', handleMotion);
                 buildRoute(mode);
             }
         });
     } else {
-        window.addEventListener('deviceorientation', e => heading = e.alpha || 0);
+        // Для устройств, не требующих явного разрешения
+        window.addEventListener('deviceorientation', handleOrientation);
         window.addEventListener('devicemotion', handleMotion);
         buildRoute(mode);
     }
 }
-function handleMotion(event) {
+    function handleMotion(event) {
     if (!userMarker || !coordsA) return;
     const acc = event.acceleration;
     if (!acc || acc.x === null) return;
 
-    const acceleration = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
-    const limitedAcc = Math.min(acceleration, 5.0);
-    if (acceleration > 0.8) {
-        const speed = 0.0000001;
-        userPos.x += Math.sin(heading * Math.PI / 180) * acceleration * speed;
-        userPos.y += Math.cos(heading * Math.PI / 180) * acceleration * speed;
+    const rawAcc = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
+    filteredAcc = (alphaFilter * rawAcc) + ((1 - alphaFilter) * filteredAcc);
 
-        const newLat = coordsA[0] + (userPos.y * 10);
-        const newLng = coordsA[1] + (userPos.x * 10);
+    // Увеличиваем порог до 0.5, чтобы избежать "дрейфа" от вибраций телефона
+    if (filteredAcc > 0.5) {
+        const scale = 0.000005; // Чуть увеличил масштаб для плавности
+        userPos.x += Math.sin(heading * Math.PI / 180) * filteredAcc * scale;
+        userPos.y += Math.cos(heading * Math.PI / 180) * filteredAcc * scale;
+
+        let targetLat = coordsA[0] + (userPos.y * 10);
+        let targetLng = coordsA[1] + (userPos.x * 10);
+
+        let finalPos = routeLine ? getClosestPointOnRoute(targetLat, targetLng, routeLine) : [targetLat, targetLng];
         
-        userMarker.setLatLng([newLat, newLng]);
-        map.panTo([newLat, newLng]);
+        userMarker.setLatLng(finalPos);
+
+        // Центрируем карту только если маркер уходит за границы экрана
+        if (!map.getBounds().contains(finalPos)) {
+            map.panTo(finalPos);
+        }
     }
 }
-    </script>
+  // Функция находит ближайшую точку на линии маршрута
+  function getClosestPointOnRoute(lat, lng, polyline) {
+        const latlngs = polyline.getLatLngs();
+        let minDistance = Infinity;
+        let closestPoint = latlngs[0];
+
+        latlngs.forEach(p => {
+        const dist = map.distance([lat, lng], p);
+        if (dist < minDistance) {
+            minDistance = dist;
+            closestPoint = p;
+        }
+    });
+    // Если мы ближе 20 метров к дороге, "магнитим" нас к ней
+    return minDistance < 20 ? closestPoint : [lat, lng];
+    }
+   </script>
 </body>
 </html>
