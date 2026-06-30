@@ -507,29 +507,38 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
         buildRoute(mode);
     }
 }
-    function handleMotion(event) {
+  function handleMotion(event) {
     if (!userMarker || !coordsA) return;
     const acc = event.acceleration;
     if (!acc || acc.x === null) return;
 
+    // Сглаживание
     const rawAcc = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
     filteredAcc = (alphaFilter * rawAcc) + ((1 - alphaFilter) * filteredAcc);
 
-    // Увеличиваем порог до 0.5, чтобы избежать "дрейфа" от вибраций телефона
-    if (filteredAcc > 0.5) {
-        const scale = 0.000005; // Чуть увеличил масштаб для плавности
+    // Увеличиваем порог отсечки, чтобы убрать дребезг
+    if (filteredAcc > 0.8) { 
+        // Уменьшаем масштаб в 10 раз по сравнению с тем, что было
+        const scale = 0.0000002; 
+        
         userPos.x += Math.sin(heading * Math.PI / 180) * filteredAcc * scale;
         userPos.y += Math.cos(heading * Math.PI / 180) * filteredAcc * scale;
 
-        let targetLat = coordsA[0] + (userPos.y * 10);
-        let targetLng = coordsA[1] + (userPos.x * 10);
+        // Используем более точный расчет, чтобы не улетать на километры
+        let targetLat = coordsA[0] + (userPos.y * 0.001); 
+        let targetLng = coordsA[1] + (userPos.x * 0.001);
 
-        let finalPos = routeLine ? getClosestPointOnRoute(targetLat, targetLng, routeLine) : [targetLat, targetLng];
+        let finalPos;
+        if (routeLine) {
+            finalPos = getClosestPointOnRoute(targetLat, targetLng, routeLine);
+        } else {
+            finalPos = [targetLat, targetLng];
+        }
         
         userMarker.setLatLng(finalPos);
 
-        // Центрируем карту только если маркер уходит за границы экрана
-        if (!map.getBounds().contains(finalPos)) {
+        // Центрируем карту, только если маркер вышел за границы экрана
+        if (map.getBounds && !map.getBounds().contains(finalPos)) {
             map.panTo(finalPos);
         }
     }
