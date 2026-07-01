@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Autonomous Navigation — Live Map v1.0</title>
+    <title>Autonomous Navigation — Live Map v1.3 (Anti-EW)</title>
     
     <!-- Leaflet CSS & JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -60,7 +60,6 @@
             color: var(--text-main);
         }
 
-        /* 1-е окно: Выбор города */
         #city-modal {
             position: fixed;
             top: 0;
@@ -95,7 +94,6 @@
             margin-bottom: 1.5rem;
         }
 
-        /* 2-е окно: Панель Откуда / Куда */
         #setup-panel {
             display: none;
             width: 90%;
@@ -112,7 +110,6 @@
             box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6);
         }
 
-        /* 3-е окно: Навигация */
         #navigation-panel {
             display: none;
             width: 90%;
@@ -280,7 +277,7 @@
     <!-- 3-е окно -->
     <div id="navigation-panel">
         <div class="nav-header">
-            <button class="back-btn" onclick="exitNavigation()" style="margin: 0;">←</button>
+            <button class="back-btn" onclick="exitNavigation()" style="margin: 0;">← Прервать</button>
             <div style="width: 24px;"></div>
         </div>
         <div id="nav-instruction">Построение маршрута...</div>
@@ -297,29 +294,24 @@
         let coordsB = null;
         let cityBoundingBox = null;
         let userMarker = null; 
-        let userPos = { x: 0, y: 0 }; 
+        
+        // --- ГИБРИДНЫЕ ПЕРЕМЕННЫЕ (GPS + IMU) ---
+        let currentPosition = null;      // Реальные текущие координаты {lat, lng}
+        let watchId = null;              // ID процесса GPS
+        let lastValidGpsTime = 0;        // Время последней честной координаты
+        
         let heading = 0; 
         let filteredAcc = 0;
         const alphaFilter = 0.15;
 
-        // --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ СТАБИЛИЗАЦИИ И ПЕРЕПРОКЛАДКИ ---
-        let currentVehicleMode = 'foot'; // Храним режим (пешком/авто)
-        let isRerouting = false;         // Блокировка повторных запросов при перерасчете
-        let lastStepTime = 0;            // Таймер для фильтрации частоты шагов
-
-
-        function handleOrientation(event) { 
-            console.log('Ориентация (alpha/beta/gamma):', event.alpha, event.beta, event.gamma); 
-        }
-        
-        // -------------------------------
+        let currentVehicleMode = 'foot'; 
+        let isRerouting = false;         
+        let lastStepTime = 0;            
+        let baseHeading = 0; 
 
         window.onload = function() {
             map = L.map('map', { zoomControl: true }).setView([48.4654, 35.0465], 11);
-
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                maxZoom: 19
-            }).addTo(map);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
 
             setupCityAutocomplete();
             setupAddressAutocomplete('from', 'suggest-from');
@@ -367,53 +359,45 @@
             });
         }
 
-function setupAddressAutocomplete(inputId, suggestPanelId) {
-    const input = document.getElementById(inputId);
-    const suggestBox = document.getElementById(suggestPanelId);
-    let timeoutId;
+        function setupAddressAutocomplete(inputId, suggestPanelId) {
+            const input = document.getElementById(inputId);
+            const suggestBox = document.getElementById(suggestPanelId);
+            let timeoutId;
 
-    input.addEventListener('input', function() {
-        clearTimeout(timeoutId);
-        const query = this.value.trim();
-        
-        if (query.length < 3) { 
-            suggestBox.style.display = 'none'; 
-            return; 
+            input.addEventListener('input', function() {
+                clearTimeout(timeoutId);
+                const query = this.value.trim();
+                if (query.length < 3) { suggestBox.style.display = 'none'; return; }
+
+                timeoutId = setTimeout(() => {
+                    let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=ru&limit=5`;
+                    if (typeof cityBoundingBox !== 'undefined' && cityBoundingBox) {
+                        url += `&viewbox=${cityBoundingBox}&bounded=1`;
+                    }
+
+                    fetch(url).then(res => res.json()).then(data => {
+                        suggestBox.innerHTML = '';
+                        if (!data || data.length === 0) { suggestBox.style.display = 'none'; return; }
+                        suggestBox.style.display = 'block';
+
+                        data.forEach(item => {
+                            const div = document.createElement('div');
+                            div.className = 'suggest-item';
+                            div.innerText = item.display_name.split(',').slice(0, 3).join(',');
+                            div.onclick = function() {
+                                input.value = div.innerText;
+                                suggestBox.style.display = 'none';
+                                const c = [parseFloat(item.lat), parseFloat(item.lon)];
+                                if (inputId === 'to') coordsB = c; else coordsA = c;
+                                map.setView(c, 16);
+                            };
+                            suggestBox.appendChild(div);
+                        });
+                    });
+                }, 500);
+            });
         }
 
-        timeoutId = setTimeout(() => {
-            let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&accept-language=ru&limit=5`;
-            
-            if (typeof cityBoundingBox !== 'undefined' && cityBoundingBox) {
-                url += `&viewbox=${cityBoundingBox}&bounded=1`;
-            }
-
-            fetch(url)
-            .then(res => res.json())
-            .then(data => {
-                suggestBox.innerHTML = '';
-                if (!data || data.length === 0) { suggestBox.style.display = 'none'; return; }
-                suggestBox.style.display = 'block';
-
-                data.forEach(item => {
-                    const div = document.createElement('div');
-                    div.className = 'suggest-item';
-                    div.innerText = item.display_name.split(',').slice(0, 3).join(',');
-                    div.onclick = function() {
-                        input.value = div.innerText;
-                        suggestBox.style.display = 'none';
-                        const c = [parseFloat(item.lat), parseFloat(item.lon)];
-                        if (inputId === 'to') coordsB = c; else coordsA = c;
-                        map.setView(c, 16);
-                    };
-                    suggestBox.appendChild(div);
-                });
-            });
-        }, 500);
-    });
-}
-
-        // --- ИЗМЕНЕННАЯ ФУНКЦИЯ СТРОИТЕЛЬСТВА МАРШРУТА ---
         function buildRoute(mode) {
             if (!coordsA || !coordsB) {
                 alert("Выберите точки отправления и назначения!");
@@ -431,12 +415,10 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
             fetch(url)
             .then(res => res.json())
             .then(data => {
-                // Маршрут успешно получен, снимаем блокировку перепрокладки
                 isRerouting = false; 
                 
                 if (!data.paths || data.paths.length === 0) {
-                    alert("Маршрут не найден! Попробуйте другие точки.");
-                    exitNavigation();
+                    document.getElementById('nav-instruction').innerText = "Вне зоны дороги. Идем дальше...";
                     return;
                 }
 
@@ -450,13 +432,17 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
 
                 routeLine = L.polyline(coordinates, { color: '#007aff', weight: 6, opacity: 0.8 }).addTo(map);
                 
-                // Если маркер пользователя уже создан, просто двигаем его на старт, а не дублируем
+                // Инициализация стартовой позиции
+                if (!currentPosition) {
+                    currentPosition = { lat: coordsA[0], lng: coordsA[1] };
+                }
+
                 if (!userMarker) {
                     userMarker = L.circleMarker(coordsA, { 
                         radius: 8, fillColor: '#007aff', color: '#fff', weight: 3, fillOpacity: 1 
                     }).addTo(map);
                 } else {
-                    userMarker.setLatLng(coordsA);
+                    userMarker.setLatLng([currentPosition.lat, currentPosition.lng]);
                 }
 
                 markerA = L.circleMarker(coordsA, { radius: 7, fillColor: '#34c759', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(map);
@@ -466,10 +452,9 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
                 document.getElementById('nav-meta').innerText = `${Math.round(path.time / 60000)} мин (${(path.distance / 1000).toFixed(1)} км)`;
             })
             .catch(err => {
-                console.error(err);
+                console.error("API Error:", err);
                 isRerouting = false;
-                alert("Ошибка сети или API ключа.");
-                exitNavigation();
+                document.getElementById('nav-instruction').innerText = "Поиск дороги...";
             });
         }
 
@@ -487,137 +472,186 @@ function setupAddressAutocomplete(inputId, suggestPanelId) {
             if (markerB) map.removeLayer(markerB);
         }
 
+        // --- ОЧИСТКА ВСЕХ СЕНСОРОВ ПРИ ВЫХОДЕ ---
         function exitNavigation() {
             if (routeLine) map.removeLayer(routeLine);
+            if (userMarker) map.removeLayer(userMarker);
+            if (markerA) map.removeLayer(markerA);
+            if (markerB) map.removeLayer(markerB);
+            
+            userMarker = null;
+            currentPosition = null;
+            isRerouting = false;
+            
+            // Глушим акселерометр
+            window.removeEventListener('deviceorientationabsolute', handleOrientation);
+            window.removeEventListener('deviceorientation', handleOrientation);
+            window.removeEventListener('devicemotion', handleMotion);
+            
+            // Глушим GPS
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+
             document.getElementById('navigation-panel').style.display = 'none';
             document.getElementById('setup-panel').style.display = 'block';
         }
-        
-        let baseHeading = 0; 
 
-        // --- ИЗМЕНЕННАЯ ФУНКЦИЯ ЗАПРОСА ДАТЧИКОВ ---
-        function requestSensorPermission(mode) {
-            currentVehicleMode = mode; // Запоминаем выбранный пресет перемещения
-            
-            const handleOrientation = (e) => {
-                if (e.alpha !== null) {
-                    if (baseHeading === 0) baseHeading = e.alpha;
-                    heading = (e.alpha - baseHeading + 360) % 360;
-                }
-            };
+        // --- УМНЫЙ КОМПАС (ПОИСК ИСТИННОГО СЕВЕРА) ---
+        function handleOrientation(e) {
+            let compass = null;
+            if (e.webkitCompassHeading) {
+                // Идеально для iOS
+                compass = e.webkitCompassHeading;
+            } else if (e.absolute && e.alpha !== null) {
+                // Идеально для современного Android
+                compass = 360 - e.alpha; 
+            } else if (e.alpha !== null) {
+                // Запасной вариант
+                if (baseHeading === 0) baseHeading = e.alpha;
+                compass = (e.alpha - baseHeading + 360) % 360;
+            }
 
-            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-                DeviceOrientationEvent.requestPermission().then(response => {
-                    if (response === 'granted') {
-                        window.addEventListener('deviceorientation', handleOrientation);
-                        window.addEventListener('devicemotion', handleMotion);
-                        buildRoute(mode);
-                    }
-                });
-            } else {
-                window.addEventListener('deviceorientation', handleOrientation);
-                window.addEventListener('devicemotion', handleMotion);
-                buildRoute(mode);
+            if (compass !== null) {
+                heading = compass;
             }
         }
 
-// --- ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ ФУНКЦИЯ ОБРАБОТКИ ДВИЖЕНИЯ ---
-function handleMotion(event) {
-    if (!userMarker || !coordsA || isRerouting) return;
-    
-    const acc = event.acceleration;
-    if (!acc || acc.x === null) return;
+        // --- ЗАЩИТА ОТ РЭБ / СПУФИНГА GPS ---
+        function startGPS() {
+            if ("geolocation" in navigator) {
+                watchId = navigator.geolocation.watchPosition(
+                    (position) => {
+                        const lat = position.coords.latitude;
+                        const lng = position.coords.longitude;
+                        const acc = position.coords.accuracy;
+                        
+                        // Если точность хуже 50 метров - это мусор, игнорируем
+                        if (acc > 50) return; 
 
-    // Считаем текущее ускорение устройства
-    const rawAcc = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
-    filteredAcc = (alphaFilter * rawAcc) + ((1 - alphaFilter) * filteredAcc);
+                        if (currentPosition) {
+                            const dist = map.distance([currentPosition.lat, currentPosition.lng], [lat, lng]);
+                            const timeDiff = Date.now() - lastValidGpsTime;
+                            
+                            // Защита от телепортации (прыжок больше 100 метров за секунду = глушилка)
+                            if (timeDiff > 0 && (dist / (timeDiff / 1000)) > 100) { 
+                                return; 
+                            }
+                        }
 
-    const now = Date.now();
-
-    /* ФИЛЬТР ТРЯСКИ И ШАГА:
-      1. filteredAcc > 0.6 — отсекаем мелкие дрожания рук.
-      2. filteredAcc < 4.5 — жесткое ограничение. Если телефон интенсивно трясут, 
-         ускорение вылетит за этот лимит, и шаг не зачтется. Точка останется на месте.
-      3. now - lastStepTime > 400 — человек физически не может делать шаги чаще, 
-         чем раз в 400 миллисекунд. Защита от спама ложных сигналов датчика.
-    */
-    if (filteredAcc > 0.6 && filteredAcc < 4.5 && (now - lastStepTime > 400)) { 
-        lastStepTime = now;
-        
-        // Фиксированная длина шага в координатной сетке карты (примерно 0.7 - 1 метр)
-        const stepSize = 0.000008; 
-        
-        // Прибавляем строго фиксированный шаг по вектору направления компаса
-        userPos.x += Math.sin(heading * Math.PI / 180) * stepSize;
-        userPos.y += Math.cos(heading * Math.PI / 180) * stepSize;
-
-        // Рассчитываем новые потенциальные координаты
-        let targetLat = coordsA[0] + userPos.y; 
-        let targetLng = coordsA[1] + userPos.x;
-
-        // Измеряем дистанцию до проложенного маршрута
-        let minDistance = Infinity;
-        let closestPoint = coordsA;
-
-        if (routeLine) {
-            const latlngs = routeLine.getLatLngs();
-            latlngs.forEach(p => {
-                const dist = map.distance([targetLat, targetLng], p);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    closestPoint = p;
-                }
-            });
+                        // Если данные прошли проверку — обновляем нашу точку
+                        currentPosition = { lat, lng };
+                        lastValidGpsTime = Date.now();
+                        updateMarkerOnMap();
+                    },
+                    (error) => { console.warn("GPS потерян, едем на датчиках", error); },
+                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+                );
+            }
         }
 
-        /* ЛОГИКА СХОДА С МАРШРУТА (АВТОМАТИЧЕСКИЙ РЕРАУТИНГ):
-          Если мы ушли в сторону от линии дороги более чем на 30 метров.
-        */
-        if (minDistance > 30 && routeLine) {
-            isRerouting = true; // Блокируем новые шаги на время обработки запроса API
-            document.getElementById('nav-instruction').innerText = "Перерасчет маршрута...";
+        function requestSensorPermission(mode) {
+            currentVehicleMode = mode; 
+            currentPosition = null; 
+
+            const initSensors = () => {
+                // Подключаем все датчики и GPS
+                window.addEventListener('deviceorientationabsolute', handleOrientation); 
+                window.addEventListener('deviceorientation', handleOrientation); 
+                window.addEventListener('devicemotion', handleMotion);
+                startGPS();
+                buildRoute(mode);
+            };
+
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission().then(response => {
+                    if (response === 'granted') initSensors();
+                });
+            } else {
+                initSensors();
+            }
+        }
+
+        // --- СДВИГ ПО СФЕРЕ ЗЕМЛИ (В МЕТРАХ) ---
+        function moveMarkerInMeters(meters, headingDegrees) {
+            if (!currentPosition) return;
+            const earthRadius = 6378137; 
+            const rad = Math.PI / 180;
+            const latRad = currentPosition.lat * rad;
+
+            // Вычисляем геометрию смещения
+            const offsetLat = (meters * Math.cos(headingDegrees * rad)) / earthRadius;
+            const offsetLng = (meters * Math.sin(headingDegrees * rad)) / (earthRadius * Math.cos(latRad));
+
+            currentPosition.lat += (offsetLat / rad);
+            currentPosition.lng += (offsetLng / rad);
+        }
+
+        // --- ШАГОМЕР И ИНЕРЦИОННАЯ НАВИГАЦИЯ ---
+        function handleMotion(event) {
+            if (!userMarker || !currentPosition || isRerouting) return;
             
-            // Назначаем текущие фактические координаты новой точкой старта (А)
-            coordsA = [targetLat, targetLng];
-            
-            // Сбрасываем накопленный шаг, так как теперь отсчет идет от новой coordsA
-            userPos = { x: 0, y: 0 }; 
-            
-            // Запрашиваем новый путь из текущего места до старой точки Б
-            setTimeout(() => {
-                buildRoute(currentVehicleMode);
-            }, 400);
-            return;
+            const acc = event.acceleration;
+            if (!acc || acc.x === null) return;
+
+            const rawAcc = Math.sqrt(acc.x * acc.x + acc.y * acc.y);
+            filteredAcc = (alphaFilter * rawAcc) + ((1 - alphaFilter) * filteredAcc);
+
+            const now = Date.now();
+
+            if (filteredAcc > 0.6 && filteredAcc < 4.5 && (now - lastStepTime > 400)) { 
+                lastStepTime = now;
+                
+                // Длина шага 80 см
+                const stepSizeInMeters = 0.8; 
+                
+                // Двигаем реальные координаты
+                moveMarkerInMeters(stepSizeInMeters, heading);
+                
+                // Обновляем маркер
+                updateMarkerOnMap();
+            }
         }
 
-        // Если мы в пределах 20 метров — плавно магнитим точку к дороге.
-        // Если между 20 и 30 метрами — отображаем реальный сход с дороги.
-        let finalPos = minDistance < 20 ? [closestPoint.lat, closestPoint.lng] : [targetLat, targetLng];
-        
-        userMarker.setLatLng(finalPos);
+        // --- ЕДИНЫЙ КОНТРОЛЛЕР ОТРИСОВКИ И ПРИЛИПАНИЯ ---
+        function updateMarkerOnMap() {
+            if (!currentPosition || !userMarker) return;
 
-        // Центрируем карту за пользователем
-        if (map.getBounds && !map.getBounds().contains(finalPos)) {
-            map.panTo(finalPos);
+            let minDistance = Infinity;
+            let closestPoint = [currentPosition.lat, currentPosition.lng];
+
+            if (routeLine) {
+                const latlngs = routeLine.getLatLngs();
+                latlngs.forEach(p => {
+                    const dist = map.distance([currentPosition.lat, currentPosition.lng], p);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        closestPoint = p;
+                    }
+                });
+            }
+
+            // Перерасчет маршрута при сходе (более 30 метров от дороги)
+            if (minDistance > 30 && routeLine && !isRerouting) {
+                isRerouting = true; 
+                document.getElementById('nav-instruction').innerText = "Перерасчет маршрута...";
+                coordsA = [currentPosition.lat, currentPosition.lng];
+                
+                setTimeout(() => {
+                    buildRoute(currentVehicleMode);
+                }, 400);
+                return;
+            }
+
+            // Магнит к дороге в пределах 20 метров
+            let finalPos = minDistance < 20 ? closestPoint : [currentPosition.lat, currentPosition.lng];
+            userMarker.setLatLng(finalPos);
+
+            if (map.getBounds && !map.getBounds().contains(finalPos)) {
+                map.panTo(finalPos);
+            }
         }
-    }
-}
-
-// Функция находит ближайшую точку на линии маршрута
-function getClosestPointOnRoute(lat, lng, polyline) {
-        const latlngs = polyline.getLatLngs();
-        let minDistance = Infinity;
-        let closestPoint = latlngs[0];
-
-        latlngs.forEach(p => {
-        const dist = map.distance([lat, lng], p);
-        if (dist < minDistance) {
-            minDistance = dist;
-            closestPoint = p;
-        }
-    });
-    return minDistance < 20 ? closestPoint : [lat, lng];
-    }
-   </script>
+    </script>
 </body>
 </html>
